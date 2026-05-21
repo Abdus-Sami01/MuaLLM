@@ -1,0 +1,43 @@
+# Shared defaults. Variants override the 'attention' key.
+
+model:
+  vocab_size: 8000          # set by tokenizer at load time
+  d_model: 256
+  n_heads: 4
+  n_layers: 6
+  d_ff: 1024
+  max_len: 512
+  dropout: 0.1
+  attention: softmax        # softmax | linear | rwkv
+
+tokenizer:
+  vocab_size: 8000
+  min_frequency: 2
+  path: data/processed/tokenizer.json
+
+data:
+  raw_text: data/raw/wiki_edu.txt
+  chunks_dir: data/processed/chunks
+  qa_dir: data/qa
+  chunk_max_tokens: 256
+  chunk_stride: 64
+
+pretrain:
+  epochs: 1
+  batch_size: 8
+  lr: 1.0e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+  mask_prob: 0.15
+  max_len: 256
+  log_every: 50
+  ckpt: checkpoints/pretrain.pt
+
+finetune:
+  epochs: 3
+  batch_size: 8
+  lr: 3.0e-5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  max_len: 256
+  ckpt: checkpoints/finetune.pt
