@@ -4,12 +4,14 @@ import torch.nn as nn
 from .attention.softmax import SoftmaxAttention
 from .attention.linear import LinearAttention
 from .attention.rwkv import RWKVTimeMix
+from .ssm.mamba2 import MambaMix
 
 
 ATTENTION_REGISTRY = {
     'softmax': SoftmaxAttention,
     'linear': LinearAttention,
     'rwkv': RWKVTimeMix,
+    'mamba': MambaMix,
 }
 
 
