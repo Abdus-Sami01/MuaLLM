@@ -14,16 +14,22 @@ import torch
 
 from src.tokenizer.train_bpe import load_tokenizer, SPECIAL_TOKENS
 from src.data.chunk import chunk_text
+from src.data.pack_tokens import load_meta
 from src.model.decoder import Decoder
 from src.model.heads import CausalLMHead
-from src.train.train_clm import CLMDataset, save_checkpoint
+from src.train.train_clm import CLMDataset, PackedCLMDataset, save_checkpoint
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", required=True)
+    ap.add_argument("--corpus",
+                    help="raw text corpus (in-RAM path; omit if --packed-bin)")
+    ap.add_argument("--packed-bin",
+                    help="memmapped token .bin from src.data.pack_tokens "
+                         "(streams from disk; preferred for large corpora)")
+    ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--attention", default="softmax",
                     choices=["softmax", "linear", "rwkv"])
@@ -54,19 +60,42 @@ def main():
     special_ids = [tok.token_to_id(t) for t in SPECIAL_TOKENS]
     print(f"vocab={vocab_size} pad={pad_id} cls={cls_id} sep={sep_id} mask={mask_id}")
 
-    print(f"loading corpus: {args.corpus}")
-    text = Path(args.corpus).read_text(encoding="utf-8", errors="ignore")
-    print(f"corpus chars: {len(text):,}")
+    if not args.packed_bin and not args.corpus:
+        raise SystemExit("pass --packed-bin (preferred) or --corpus")
 
-    print(f"chunking (max={args.chunk_tokens}, stride={args.stride})...")
-    chunks = chunk_text(text, tok, max_tokens=args.chunk_tokens, stride=args.stride)
-    print(f"chunks: {len(chunks):,}")
-    if not chunks:
-        raise SystemExit("no chunks produced")
+    if args.packed_bin:
+        # streaming path: memmap a flat token .bin, slice windows on demand.
+        meta = load_meta(args.packed_bin)
+        dtype = meta.get("dtype", "uint16")
+        n_tokens = meta.get("n_tokens")
+        body_len = args.max_len - 2
+        step = max(1, body_len - args.stride)  # --stride keeps overlap meaning
+        ds = PackedCLMDataset(
+            args.packed_bin, cls_id=cls_id, sep_id=sep_id, pad_id=pad_id,
+            max_len=args.max_len, step=step, dtype=dtype, n_tokens=n_tokens,
+        )
+        print(f"packed: {args.packed_bin}  tokens={ds.n_tokens:,}  "
+              f"windows={len(ds):,}  step={step}  dtype={dtype}")
+        if len(ds) == 0:
+            raise SystemExit("no windows; corpus too small or max_len too large")
+    else:
+        # in-RAM path: load whole corpus, chunk fully into memory.
+        print(f"loading corpus: {args.corpus}")
+        text = Path(args.corpus).read_text(encoding="utf-8", errors="ignore")
+        print(f"corpus chars: {len(text):,}")
 
-    ds = CLMDataset(chunks, vocab_size, pad_id, cls_id, sep_id,
-                    special_ids=special_ids, max_len=args.max_len)
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True)
+        print(f"chunking (max={args.chunk_tokens}, stride={args.stride})...")
+        chunks = chunk_text(text, tok, max_tokens=args.chunk_tokens,
+                            stride=args.stride)
+        print(f"chunks: {len(chunks):,}")
+        if not chunks:
+            raise SystemExit("no chunks produced")
+
+        ds = CLMDataset(chunks, vocab_size, pad_id, cls_id, sep_id,
+                        special_ids=special_ids, max_len=args.max_len)
+
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
+                        num_workers=args.num_workers)
 
     dec = Decoder(
         vocab_size=vocab_size, d_model=args.d_model, n_heads=args.n_heads,

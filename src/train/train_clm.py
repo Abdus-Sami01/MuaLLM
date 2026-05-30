@@ -1,7 +1,13 @@
 """Causal LM pretrain: Predict next token."""
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+
+_MIN_BODY = 8  # min real tokens in a window (mirrors chunk_text's `< 8: break`)
+_DTYPES = {"uint16": np.uint16, "uint32": np.uint32}
 
 
 class CLMDataset(Dataset):
@@ -32,6 +38,89 @@ class CLMDataset(Dataset):
         # Mask out padding in labels
         labels = [l if l != self.pad_id else -100 for l in labels]
         
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
+
+
+class PackedCLMDataset(Dataset):
+    """Windowed CLM over a flat memmapped token stream.
+
+    Reads the `.bin` written by `src.data.pack_tokens` instead of holding token
+    chunks in RAM. Each item is a `[CLS] <window> [SEP]` slice, padded to
+    `max_len`, with the same `input_ids`/`labels` (`-100` on pad) scheme as
+    `CLMDataset`, so the existing train loop consumes it unchanged.
+
+    The memmap is opened lazily so the dataset is safe to fork across DataLoader
+    workers (each worker gets its own handle).
+
+    Args:
+        bin_path: path to the packed token .bin.
+        step: tokens to advance between window starts. Defaults to the body
+            length (`max_len - 2`) = non-overlapping windows. Pass a smaller
+            value for overlap.
+        n_tokens: total tokens in the file; inferred from file size if omitted.
+    """
+
+    def __init__(self, bin_path, *, cls_id, sep_id, pad_id, max_len=256,
+                 step=None, dtype="uint16", n_tokens=None):
+        if dtype not in _DTYPES:
+            raise ValueError(f"dtype must be one of {list(_DTYPES)}")
+        self.bin_path = str(bin_path)
+        self.cls_id = cls_id
+        self.sep_id = sep_id
+        self.pad_id = pad_id
+        self.max_len = max_len
+        self.body_len = max_len - 2          # leave room for [CLS] + [SEP]
+        self.np_dtype = _DTYPES[dtype]
+        self.step = max(1, step if step is not None else self.body_len)
+
+        if n_tokens is None:
+            itemsize = np.dtype(self.np_dtype).itemsize
+            n_tokens = Path(self.bin_path).stat().st_size // itemsize
+        self.n_tokens = int(n_tokens)
+
+        # window starts at 0, step, 2*step, ... while >= _MIN_BODY tokens remain
+        last_start = self.n_tokens - _MIN_BODY
+        self.n_windows = 0 if last_start < 0 else (last_start // self.step) + 1
+
+        self._data = None  # lazy per-worker memmap
+
+    def _mm(self):
+        if self._data is None:
+            self._data = np.memmap(self.bin_path, dtype=self.np_dtype, mode="r")
+        return self._data
+
+    def close(self):
+        """Release the memmap handle (Windows locks the file while open)."""
+        if self._data is not None:
+            mm = getattr(self._data, "_mmap", None)
+            if mm is not None:
+                mm.close()
+            self._data = None
+
+    def __len__(self):
+        return self.n_windows
+
+    def __getitem__(self, idx):
+        if idx < 0:
+            idx += self.n_windows
+        if not 0 <= idx < self.n_windows:
+            raise IndexError(idx)
+        data = self._mm()
+        start = idx * self.step
+        body = data[start:start + self.body_len].tolist()
+        seq = [self.cls_id] + body + [self.sep_id]
+
+        pad_len = self.max_len - len(seq)
+        if pad_len > 0:
+            seq = seq + [self.pad_id] * pad_len
+
+        input_ids = seq[:-1]
+        labels = seq[1:]
+        labels = [l if l != self.pad_id else -100 for l in labels]
+
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
