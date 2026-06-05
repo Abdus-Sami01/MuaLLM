@@ -87,12 +87,10 @@ def generate(args):
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    # fp16 sampling can emit inf/nan logits -> multinomial CUDA assert. Use bf16
-    # on Ampere+ (cc>=8), else fp32. Never fp16 for generation.
-    if device == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
-        dtype = torch.bfloat16
-    else:
-        dtype = torch.float32
+    # bf16 (8-bit exponent like fp32) is sampling-safe AND half the memory of
+    # fp32, so it fits bigger teachers/batches on any CUDA GPU incl. T4. fp16 is
+    # NOT safe here: 5-bit exponent overflows -> inf logits -> multinomial assert.
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
     print(f"teacher: {args.teacher}  device={device}  dtype={dtype}")
 
     tok = AutoTokenizer.from_pretrained(args.teacher, trust_remote_code=True)

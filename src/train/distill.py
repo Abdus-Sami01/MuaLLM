@@ -76,7 +76,7 @@ def cache_teacher_logits(args):
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
     print(f"teacher: {args.teacher}  device={device}  dtype={dtype}")
 
     tok = AutoTokenizer.from_pretrained(args.teacher, trust_remote_code=True)

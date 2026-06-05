@@ -86,8 +86,10 @@ Defaults = a fast **smoke run** (finishes in minutes on a T4) that already
 shows real fluency + clean stopping. Scale the commented values for a coherent
 bot."""))
 cells.append(code(r"""TEACHER     = "HuggingFaceTB/SmolLM2-360M-Instruct"  # 49k vocab, fast cache
+# Bigger teacher = better data, SAME 49k vocab (student size unchanged), fits T4:
+# TEACHER   = "HuggingFaceTB/SmolLM2-1.7B-Instruct"  # bf16 ~3.4GB
 N_PAIRS     = 3000      # -> 20000+ for a genuinely coherent bot
-GEN_BATCH   = 16
+GEN_BATCH   = 32        # raise to use more GPU (faster gen); lower if OOM
 MAX_NEW     = 160       # teacher answer length (tokens)
 MAX_LEN     = 512       # distill block length
 TOPK        = 20
