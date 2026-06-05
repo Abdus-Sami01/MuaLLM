@@ -46,9 +46,16 @@ def main():
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--device", default="auto",
+                    help="auto | cuda | cpu (auto picks cuda when available)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
+    device = args.device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device: {device}"
+          + (f"  ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
 
     print(f"loading tokenizer: {args.tokenizer}")
     tok = load_tokenizer(args.tokenizer)
@@ -103,6 +110,8 @@ def main():
         attention=args.attention, dropout=0.1, pad_id=pad_id,
     )
     clm = CausalLMHead(args.d_model, vocab_size, tied_weight=dec.embed.tok.weight)
+    dec.to(device)
+    clm.to(device)
     n_dec = sum(p.numel() for p in dec.parameters())
     n_clm = sum(p.numel() for p in clm.parameters() if id(p) != id(dec.embed.tok.weight))
     print(f"params: decoder={n_dec:,}  clm_extra={n_clm:,}  attention={args.attention}")
@@ -124,8 +133,8 @@ def main():
     done = False
     while not done:
         for batch in loader:
-            input_ids = batch["input_ids"]
-            labels = batch["labels"]
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
             hidden = dec(input_ids)
             logits = clm(hidden)
             loss = F.cross_entropy(
@@ -155,9 +164,17 @@ def main():
     print(f"loss: {early:.3f} -> {late:.3f}")
 
     if args.ckpt:
+        config = {
+            "vocab_size": vocab_size, "d_model": args.d_model,
+            "n_heads": args.n_heads, "n_layers": args.n_layers,
+            "d_ff": args.d_ff, "max_len": args.max_len,
+            "attention": args.attention, "pad_id": pad_id,
+        }
         save_checkpoint(args.ckpt, dec, clm, opt,
                         meta={"attention": args.attention, "steps": step,
-                              "loss_early": early, "loss_late": late})
+                              "loss_early": early, "loss_late": late,
+                              "config": config,
+                              "tokenizer_path": args.tokenizer})
         print(f"saved checkpoint: {args.ckpt}")
 
 
