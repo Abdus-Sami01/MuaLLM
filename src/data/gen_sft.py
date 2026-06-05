@@ -184,8 +184,9 @@ def main():
     ap.add_argument("--top-p", type=float, default=0.9)
     ap.add_argument("--system",
                     default="You are a knowledgeable teaching assistant. Answer "
-                            "the question directly and concisely. Do not "
-                            "introduce yourself or mention being an AI.",
+                            "the question clearly and thoroughly with a full "
+                            "explanation. Do not introduce yourself or mention "
+                            "being an AI.",
                     help="system prompt for the teacher (pass '' to disable)")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--device", default="auto", help="auto | cuda | cpu")

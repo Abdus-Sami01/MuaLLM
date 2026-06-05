@@ -269,7 +269,11 @@ def train_distill(args):
                             betas=(0.9, 0.98))
 
     total_steps = args.epochs * len(loader)
-    warmup = args.warmup_steps
+    # Cap warmup at ~10% of training. Otherwise on small corpora warmup can
+    # exceed total_steps, the LR never finishes ramping, and the student barely
+    # trains (word-salad output).
+    warmup = min(args.warmup_steps, max(1, total_steps // 10))
+    print(f"total_steps={total_steps}  warmup={warmup}  lr={args.lr}")
 
     def lr_lambda(step):
         if step < warmup:
