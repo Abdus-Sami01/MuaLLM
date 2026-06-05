@@ -87,7 +87,12 @@ def generate(args):
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
+    # fp16 sampling can emit inf/nan logits -> multinomial CUDA assert. Use bf16
+    # on Ampere+ (cc>=8), else fp32. Never fp16 for generation.
+    if device == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+        dtype = torch.bfloat16
+    else:
+        dtype = torch.float32
     print(f"teacher: {args.teacher}  device={device}  dtype={dtype}")
 
     tok = AutoTokenizer.from_pretrained(args.teacher, trust_remote_code=True)
@@ -117,7 +122,8 @@ def generate(args):
             batch = prompts[start:start + args.batch_size]
             chats = [
                 tok.apply_chat_template(
-                    [{"role": "user", "content": p}],
+                    ([{"role": "system", "content": args.system}] if args.system
+                     else []) + [{"role": "user", "content": p}],
                     tokenize=False, add_generation_prompt=True,
                 )
                 for p in batch
@@ -127,7 +133,7 @@ def generate(args):
             gen = model.generate(
                 **enc, max_new_tokens=args.max_new_tokens, do_sample=True,
                 temperature=args.temperature, top_p=args.top_p,
-                pad_token_id=tok.pad_token_id,
+                renormalize_logits=True, pad_token_id=tok.pad_token_id,
             )
             new = gen[:, enc["input_ids"].shape[1]:]  # strip the prompt
             answers = tok.batch_decode(new, skip_special_tokens=True)
@@ -178,6 +184,11 @@ def main():
     ap.add_argument("--max-len", type=int, default=512, help="prompt truncation")
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.9)
+    ap.add_argument("--system",
+                    default="You are a knowledgeable teaching assistant. Answer "
+                            "the question directly and concisely. Do not "
+                            "introduce yourself or mention being an AI.",
+                    help="system prompt for the teacher (pass '' to disable)")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--device", default="auto", help="auto | cuda | cpu")
     ap.add_argument("--seed", type=int, default=42)

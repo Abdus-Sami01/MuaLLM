@@ -70,10 +70,13 @@ Clones `main` and installs `transformers` (the teacher) on top of the repo's
 cells.append(code(r"""import os
 REPO = "https://github.com/Abdus-Sami01/MuallM.git"
 if not os.path.isdir("MuallM"):
-    !git clone --depth 1 {REPO}
+    !git clone {REPO}
 %cd MuallM
+!git pull   # pick up re-pushed fixes on re-run
 !git log --oneline -1
-!pip install -q -r requirements.txt
+# Colab already ships a matched torch + numpy (2.x). Do NOT `pip install -r
+# requirements.txt` here: its numpy<2 pin downgrades numpy and breaks Colab's
+# torch ABI ("numpy.dtype size changed"). Only the teacher deps are missing.
 !pip install -q "transformers>=4.44" accelerate
 """))
 
