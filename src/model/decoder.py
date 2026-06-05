@@ -8,7 +8,8 @@ from .block import DecoderBlock
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, d_model, max_len=512, dropout=0.1, pad_id=0):
         super().__init__()
-        self.tok = nn.Embedding(vocab_size, d_model, padding_idx=pad_id)
+        self.tok = (nn.Embedding(vocab_size, d_model) if pad_id is None
+                    else nn.Embedding(vocab_size, d_model, padding_idx=pad_id))
         self.pos = nn.Embedding(max_len, d_model)
         self.ln = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
@@ -41,7 +42,7 @@ class Decoder(nn.Module):
         self.attention_name = attention
 
     def forward(self, input_ids, attention_mask=None):
-        if attention_mask is None:
+        if attention_mask is None and self.pad_id is not None:
             attention_mask = (input_ids != self.pad_id).long()
         x = self.embed(input_ids)
         for layer in self.layers:

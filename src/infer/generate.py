@@ -1,40 +1,90 @@
-"""Autoregressive generation / chat with a fine-tuned causal LM checkpoint.
+"""Autoregressive generation / chat with a trained causal LM checkpoint.
+
+Handles both checkpoint flavors transparently:
+  * SFT / pretrain  -> stores `tokenizer_path` (project BPE, [CLS]/[SEP])
+  * distilled        -> stores `tokenizer_id`  (teacher HF tokenizer, BOS/EOS)
+
+`TokAdapter` normalizes the two tokenizer APIs (project `tokenizers.Tokenizer`
+vs HF `AutoTokenizer`) behind encode/decode + bos_id/eos_id so the generation
+loop is identical for both.
 
 Usage:
   # single question
-  python -m src.infer.generate --ckpt checkpoints/chatbot_finetuned.pt \
-      --prompt "What is the Single National Curriculum?"
+  python -m src.infer.generate --ckpt checkpoints/edu_distill.pt \
+      --prompt "What is formative assessment?"
 
   # interactive chat loop
-  python -m src.infer.generate --ckpt checkpoints/chatbot_finetuned.pt
+  python -m src.infer.generate --ckpt checkpoints/edu_distill.pt
 """
 import argparse
 
 import torch
 import torch.nn.functional as F
 
-from src.tokenizer.train_bpe import load_tokenizer
 from src.model.decoder import Decoder
 from src.model.heads import CausalLMHead
 
 
+class TokAdapter:
+    """Uniform encode/decode + bos/eos over project-BPE or HF tokenizers."""
+
+    def __init__(self, kind, tok, bos_id, eos_id):
+        self.kind = kind          # "bpe" | "hf"
+        self.tok = tok
+        self.bos_id = bos_id
+        self.eos_id = eos_id
+
+    def encode(self, text):
+        if self.kind == "bpe":
+            return self.tok.encode(text, add_special_tokens=False).ids
+        return self.tok.encode(text, add_special_tokens=False)
+
+    def decode(self, ids):
+        if self.kind == "bpe":
+            return self.tok.decode(ids)
+        return self.tok.decode(ids, skip_special_tokens=True)
+
+    @property
+    def vocab_size(self):
+        return self.tok.get_vocab_size() if self.kind == "bpe" else self.tok.vocab_size
+
+
+def build_tokenizer(ck, override_path=None):
+    """Build a TokAdapter from checkpoint fields (or a forced BPE path)."""
+    meta = ck.get("meta", {})
+    tok_path = override_path or ck.get("tokenizer_path") or meta.get("tokenizer_path")
+    tok_id = ck.get("tokenizer_id") or meta.get("tokenizer_id")
+
+    if tok_path:
+        from src.tokenizer.train_bpe import load_tokenizer
+        t = load_tokenizer(tok_path)
+        return TokAdapter("bpe", t, t.token_to_id("[CLS]"), t.token_to_id("[SEP]"))
+    if tok_id:
+        from transformers import AutoTokenizer
+        t = AutoTokenizer.from_pretrained(tok_id, trust_remote_code=True)
+        bos = t.bos_token_id if t.bos_token_id is not None else t.eos_token_id
+        return TokAdapter("hf", t, bos, t.eos_token_id)
+    raise SystemExit(
+        "checkpoint has no tokenizer_path or tokenizer_id; pass --tokenizer"
+    )
+
+
 @torch.no_grad()
-def generate(decoder, clm_head, tokenizer, prompt, *, max_new_tokens=120,
+def generate(decoder, clm_head, tok, prompt, *, max_new_tokens=120,
              temperature=0.8, top_k=40, device="cpu"):
-    """Greedy/top-k sampled continuation. Stops at [SEP]."""
+    """Top-k sampled continuation. Stops at the tokenizer's eos id."""
     decoder.eval()
     clm_head.eval()
-    cls_id = tokenizer.token_to_id("[CLS]")
-    sep_id = tokenizer.token_to_id("[SEP]")
     max_len = decoder.embed.max_len
 
-    ids = [cls_id] + tokenizer.encode(prompt, add_special_tokens=False).ids
+    # BPE/SFT models train with a mandatory [CLS] prefix; distilled HF-tokenizer
+    # students train on raw blocks with no leading BOS, so don't force one.
+    ids = ([tok.bos_id] if tok.kind == "bpe" else []) + tok.encode(prompt)
     generated = []
     for _ in range(max_new_tokens):
         window = ids[-max_len:]
         inp = torch.tensor([window], dtype=torch.long, device=device)
-        hidden = decoder(inp)
-        logits = clm_head(hidden)[0, -1, :]
+        logits = clm_head(decoder(inp))[0, -1, :]
         logits = logits / max(temperature, 1e-5)
         if top_k:
             k = min(top_k, logits.size(-1))
@@ -42,20 +92,21 @@ def generate(decoder, clm_head, tokenizer, prompt, *, max_new_tokens=120,
             logits = logits.masked_fill(logits < kth, float("-inf"))
         probs = F.softmax(logits, dim=-1)
         nxt = torch.multinomial(probs, 1).item()
-        if nxt == sep_id:
+        if nxt == tok.eos_id:
             break
         ids.append(nxt)
         generated.append(nxt)
-    return tokenizer.decode(generated)
+    return tok.decode(generated)
 
 
 def load_model(ckpt_path, device="cpu"):
+    """Return (decoder, clm_head, config, raw_ckpt). Tokenizer built separately."""
     ck = torch.load(ckpt_path, map_location=device)
     config = ck.get("config") or ck.get("meta", {}).get("config")
     if config is None:
         raise SystemExit(
-            "checkpoint has no 'config'. Re-run SFT with the fixed run_sft.py "
-            "(it now stores config + tokenizer_path in meta)."
+            "checkpoint has no 'config'. Re-run training with the fixed scripts "
+            "(they store config + tokenizer in the checkpoint)."
         )
     decoder = Decoder(
         vocab_size=config["vocab_size"], d_model=config["d_model"],
@@ -69,15 +120,14 @@ def load_model(ckpt_path, device="cpu"):
     clm.load_state_dict(ck["clm_head"])
     decoder.to(device)
     clm.to(device)
-    tok_path = ck.get("tokenizer_path") or ck.get("meta", {}).get("tokenizer_path")
-    return decoder, clm, config, tok_path
+    return decoder, clm, config, ck
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--tokenizer", default=None,
-                    help="override tokenizer path (else read from checkpoint)")
+                    help="override BPE tokenizer path (else read from checkpoint)")
     ap.add_argument("--max-new-tokens", type=int, default=120)
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=40)
@@ -86,16 +136,13 @@ def main():
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    decoder, clm, config, tok_path = load_model(args.ckpt, device)
-    tok_path = args.tokenizer or tok_path
-    if not tok_path:
-        raise SystemExit("no tokenizer path in checkpoint; pass --tokenizer")
-    tokenizer = load_tokenizer(tok_path)
-    print(f"loaded {args.ckpt}  attention={config['attention']}  device={device}")
+    decoder, clm, config, ck = load_model(args.ckpt, device)
+    tok = build_tokenizer(ck, args.tokenizer)
+    print(f"loaded {args.ckpt}  attention={config['attention']}  "
+          f"tok={tok.kind}  device={device}")
 
     def answer(question):
-        prompt = f"User: {question}\nBot:"
-        return generate(decoder, clm, tokenizer, prompt,
+        return generate(decoder, clm, tok, f"User: {question}\nBot:",
                         max_new_tokens=args.max_new_tokens,
                         temperature=args.temperature, top_k=args.top_k,
                         device=device)

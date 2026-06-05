@@ -140,11 +140,15 @@ def generate(args):
                 if key in seen:
                     continue
                 seen.add(key)
-                # chat.py prompts "User: ...\nBot:"; trailing [SEP] teaches stop
-                text = f"User: {q}\nBot: {a} [SEP]"
-                out_f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+                # JSONL is for BPE-tokenizer SFT (run_sft): literal [SEP] maps to
+                # the project stop token. TXT is for HF-tokenizer distillation
+                # (distill cache injects the teacher EOS between these blank-line
+                # docs), so it carries no [SEP] marker.
+                out_f.write(json.dumps(
+                    {"text": f"User: {q}\nBot: {a} [SEP]"},
+                    ensure_ascii=False) + "\n")
                 if txt_f:
-                    txt_f.write(text + "\n\n")
+                    txt_f.write(f"User: {q}\nBot: {a}\n\n")
                 n_written += 1
             out_f.flush()
             print(f"  [{min(start + args.batch_size, len(prompts)):5d}/"

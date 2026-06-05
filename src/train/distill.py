@@ -50,6 +50,25 @@ from src.model.heads import CausalLMHead
 # CACHE MODE
 # ============================================================================
 
+def _encode_corpus(tok, raw, *, eos_between_docs=True):
+    """Encode corpus to teacher ids. If eos_between_docs, split on blank lines
+    and append the teacher EOS id after each doc so the student sees a stop
+    token at answer boundaries (and can learn to halt at generation time)."""
+    if not eos_between_docs:
+        return tok.encode(raw, add_special_tokens=False)
+    import re
+    eos = tok.eos_token_id
+    docs = [d.strip() for d in re.split(r"\n\s*\n", raw) if d.strip()]
+    ids = []
+    for d in docs:
+        ids.extend(tok.encode(d, add_special_tokens=False))
+        if eos is not None:
+            ids.append(eos)
+    print(f"  docs={len(docs):,}  eos_id={eos}  "
+          f"eos_inserted={len(docs) if eos is not None else 0}")
+    return ids
+
+
 @torch.no_grad()
 def cache_teacher_logits(args):
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -69,7 +88,7 @@ def cache_teacher_logits(args):
     raw = Path(args.corpus).read_text(encoding="utf-8", errors="ignore")
     print(f"corpus chars: {len(raw):,}")
     print("tokenizing (may take a minute for large corpora)...")
-    ids = tok.encode(raw, add_special_tokens=False)
+    ids = _encode_corpus(tok, raw, eos_between_docs=args.eos_between_docs)
     print(f"teacher tokens: {len(ids):,}")
 
     L = args.max_len
@@ -210,9 +229,11 @@ def train_distill(args):
     print(f"device={device}")
 
     tok = AutoTokenizer.from_pretrained(args.tokenizer_id, trust_remote_code=True)
-    if tok.pad_token_id is None:
-        tok.pad_token = tok.eos_token
-    pad_id = tok.pad_token_id
+    # Packed distill blocks are full length (cache drops the remainder), so there
+    # is no padding. Use pad_id=None so the Decoder never masks attention to, or
+    # zeros the (tied) embedding of, a real token. Critical: if pad were set to
+    # eos_id, the student could never learn to emit EOS and would never stop.
+    pad_id = None
 
     ds = DistillDataset(args.logit_dir)
     if ds.vocab_size != tok.vocab_size:
@@ -272,7 +293,8 @@ def train_distill(args):
             # inputs+teacher, drop first from labels.
             inp = input_ids[:, :-1].contiguous()
             labels = input_ids[:, 1:].contiguous().clone()
-            labels[labels == pad_id] = -100
+            if pad_id is not None:
+                labels[labels == pad_id] = -100
             # teacher logits at position t describe the distribution OVER token t+1
             # only if the teacher was conditioned on tokens [<bos>..t-1]. In our
             # cache we ran teacher(block) so logits[t] = p(token at t+1 | block[:t+1]).
@@ -343,6 +365,10 @@ def main():
     cp.add_argument("--topk", type=int, default=20)
     cp.add_argument("--shard-blocks", type=int, default=1024,
                     help="number of (L,)-length blocks per shard file")
+    cp.add_argument("--no-eos-between-docs", dest="eos_between_docs",
+                    action="store_false",
+                    help="don't insert teacher EOS between blank-line documents")
+    cp.set_defaults(eos_between_docs=True)
 
     # ---- train ----
     tp = sub.add_parser("train", help="distill student from cached logits")
