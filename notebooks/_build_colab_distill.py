@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 NB_PATH = Path(__file__).parent / "colab_distill.ipynb"
-REPO = "https://github.com/Abdus-Sami01/MuallM.git"
+REPO = "https://github.com/Abdus-Sami01/MuaLLM.git"
 
 
 def md(text):
@@ -68,10 +68,10 @@ cells.append(md(r"""## 2. Clone repo + install deps
 Clones `main` and installs `transformers` (the teacher) on top of the repo's
 `requirements.txt`. Re-running is safe (skips clone if the dir exists)."""))
 cells.append(code(r"""import os
-REPO = "https://github.com/Abdus-Sami01/MuallM.git"
-if not os.path.isdir("MuallM"):
+REPO = "https://github.com/Abdus-Sami01/MuaLLM.git"
+if not os.path.isdir("MuaLLM"):
     !git clone {REPO}
-%cd MuallM
+%cd MuaLLM
 !git pull   # pick up re-pushed fixes on re-run
 !git log --oneline -1
 # Colab already ships a matched torch + numpy (2.x). Do NOT `pip install -r

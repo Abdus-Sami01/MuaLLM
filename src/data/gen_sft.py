@@ -44,6 +44,12 @@ TEMPLATES = [
     "What are common mistakes teachers make with {t}?",
     "How does {t} affect student learning?",
     "Describe a short example of {t} in a lesson.",
+    "What does research say about {t} in education?",
+    "How can a teacher assess {t} in the classroom?",
+    "Outline a simple step-by-step way to use {t}.",
+    "What is one common misconception about {t}?",
+    "Why might {t} fail in practice, and how do you fix it?",
+    "How would you introduce {t} to a colleague new to it?",
 ]
 
 TOPICS = [
@@ -60,6 +66,17 @@ TOPICS = [
     "emotional regulation in children", "teacher-student rapport",
     "homework design", "group work dynamics", "direct instruction",
     "inquiry-based learning", "assessment for learning", "curriculum sequencing",
+    "cooperative learning", "Socratic questioning", "exit tickets",
+    "cognitive load theory", "dual coding", "interleaving practice",
+    "worked examples", "self-regulated learning", "classroom routines",
+    "culturally responsive teaching", "Universal Design for Learning",
+    "wait time in questioning", "think-pair-share", "advance organizers",
+    "mastery learning", "vocabulary instruction", "writing across the curriculum",
+    "number sense", "diagnosing misconceptions", "goal setting with students",
+    "reflective teaching practice", "scaffolded reading", "math problem solving",
+    "student engagement", "anchor charts", "formative quizzes",
+    "error analysis", "modeling and demonstration", "checking for understanding",
+    "differentiation by readiness",
 ]
 
 
