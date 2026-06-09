@@ -17,6 +17,7 @@ Usage:
   python -m src.infer.generate --ckpt checkpoints/edu_distill.pt
 """
 import argparse
+import re
 
 import torch
 import torch.nn.functional as F
@@ -72,20 +73,22 @@ def build_tokenizer(ck, override_path=None):
 @torch.no_grad()
 def generate(decoder, clm_head, tok, prompt, *, max_new_tokens=120,
              temperature=0.7, top_k=40, min_new_tokens=8,
-             repetition_penalty=1.3,
+             repetition_penalty=1.3, no_repeat_ngram_size=3,
              stop_strings=("\nUser:", "\nBot:", "\nAssistant:"),
              device="cpu"):
     """Top-k sampled continuation with guards that keep a tiny student readable.
 
-    A small distilled student is fluent at the phrase level but leaks training
-    structure (re-emits "Bot:"/"User:" turns, loops, or stops instantly with an
-    empty reply). These guards address those *presentation* failures at decode
-    time (no retrain); they do NOT fix global incoherence, which is a capacity /
-    data problem solved by scaling the student + corpus.
+    A small distilled student is fluent and mostly on-topic but degenerates at
+    decode time: it loops phrases/sentences, leaks training structure (re-emits
+    "Bot:"/"User:" turns), or stops instantly with an empty reply. These guards
+    fix those *presentation* failures with no retrain; they do NOT create global
+    coherence, which comes from training the student enough (epochs) on enough
+    in-domain data.
 
-      * min_new_tokens     - block EOS for the first N steps -> no empty replies
-      * repetition_penalty - damp logits of already-emitted tokens (anti-loop)
-      * stop_strings       - halt + trim when the model starts a NEW turn (leak)
+      * min_new_tokens       - block EOS for the first N steps -> no empty reply
+      * repetition_penalty   - damp logits of already-emitted tokens
+      * no_repeat_ngram_size - forbid repeating any n-gram (kills sentence loops)
+      * stop_strings         - halt + trim when the model starts a NEW turn
 
     Stops at the tokenizer eos id, the first stop string, or max_new_tokens.
     """
@@ -109,6 +112,16 @@ def generate(decoder, clm_head, tok, prompt, *, max_new_tokens=120,
             v = torch.where(v > 0, v / repetition_penalty, v * repetition_penalty)
             logits.index_copy_(0, seen, v)
 
+        # no-repeat n-gram: forbid completing an n-gram already emitted. This is
+        # what actually breaks the sentence-level loops a token penalty barely
+        # dents (e.g. "...at increasingly longer intervals" repeated verbatim).
+        n = no_repeat_ngram_size
+        if n and len(generated) >= n:
+            prefix = tuple(generated[-(n - 1):])
+            for i in range(len(generated) - n + 1):
+                if tuple(generated[i:i + n - 1]) == prefix:
+                    logits[generated[i + n - 1]] = float("-inf")
+
         logits = logits / max(temperature, 1e-5)
 
         # don't allow a stop before min_new_tokens -> kills empty / 1-word replies
@@ -126,23 +139,33 @@ def generate(decoder, clm_head, tok, prompt, *, max_new_tokens=120,
         ids.append(nxt)
         generated.append(nxt)
 
-        # if the student leaks into a new turn, stop and keep only this answer
-        text = tok.decode(generated)
-        cut = min((text.find(s) for s in stop_strings if s in text), default=-1)
+        # Stop if the student leaks into a NEW turn. Strip a leading echoed
+        # marker FIRST, otherwise the prompt's own trailing "Bot:" that the
+        # student parrots back would match a stop string at index 0 and truncate
+        # the whole answer to empty.
+        answer = _strip_markers(tok.decode(generated))
+        cut = min((answer.find(s) for s in stop_strings if s in answer), default=-1)
         if cut != -1:
-            return _strip_markers(text[:cut])
+            return _clean(answer[:cut])
 
-    return _strip_markers(tok.decode(generated))
+    return _clean(tok.decode(generated))
 
 
 def _strip_markers(text):
-    """Trim a leaked leading turn marker (the prompt ended at 'Bot:', so the
-    student sometimes echoes 'Bot:' back) and surrounding whitespace."""
+    """Trim a leaked leading turn marker (the prompt ends at 'Bot:', so the
+    student sometimes echoes it back) plus surrounding whitespace."""
     out = text.strip()
     for m in ("Bot:", "Bot :", "User:", "Assistant:"):
         if out.startswith(m):
             out = out[len(m):].strip()
     return out
+
+
+def _clean(text):
+    """Final cosmetic pass: drop a leading marker echo, collapse blank-line runs."""
+    out = _strip_markers(text)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 def load_model(ckpt_path, device="cpu"):
