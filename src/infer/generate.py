@@ -71,8 +71,24 @@ def build_tokenizer(ck, override_path=None):
 
 @torch.no_grad()
 def generate(decoder, clm_head, tok, prompt, *, max_new_tokens=120,
-             temperature=0.8, top_k=40, device="cpu"):
-    """Top-k sampled continuation. Stops at the tokenizer's eos id."""
+             temperature=0.7, top_k=40, min_new_tokens=8,
+             repetition_penalty=1.3,
+             stop_strings=("\nUser:", "\nBot:", "\nAssistant:"),
+             device="cpu"):
+    """Top-k sampled continuation with guards that keep a tiny student readable.
+
+    A small distilled student is fluent at the phrase level but leaks training
+    structure (re-emits "Bot:"/"User:" turns, loops, or stops instantly with an
+    empty reply). These guards address those *presentation* failures at decode
+    time (no retrain); they do NOT fix global incoherence, which is a capacity /
+    data problem solved by scaling the student + corpus.
+
+      * min_new_tokens     - block EOS for the first N steps -> no empty replies
+      * repetition_penalty - damp logits of already-emitted tokens (anti-loop)
+      * stop_strings       - halt + trim when the model starts a NEW turn (leak)
+
+    Stops at the tokenizer eos id, the first stop string, or max_new_tokens.
+    """
     decoder.eval()
     clm_head.eval()
     max_len = decoder.embed.max_len
@@ -81,11 +97,24 @@ def generate(decoder, clm_head, tok, prompt, *, max_new_tokens=120,
     # students train on raw blocks with no leading BOS, so don't force one.
     ids = ([tok.bos_id] if tok.kind == "bpe" else []) + tok.encode(prompt)
     generated = []
-    for _ in range(max_new_tokens):
+    for t in range(max_new_tokens):
         window = ids[-max_len:]
         inp = torch.tensor([window], dtype=torch.long, device=device)
         logits = clm_head(decoder(inp))[0, -1, :]
+
+        # repetition penalty (HF-style: push seen-token logits toward -inf)
+        if repetition_penalty and repetition_penalty != 1.0 and generated:
+            seen = torch.tensor(sorted(set(generated)), device=logits.device)
+            v = logits.index_select(0, seen)
+            v = torch.where(v > 0, v / repetition_penalty, v * repetition_penalty)
+            logits.index_copy_(0, seen, v)
+
         logits = logits / max(temperature, 1e-5)
+
+        # don't allow a stop before min_new_tokens -> kills empty / 1-word replies
+        if t < min_new_tokens and tok.eos_id is not None:
+            logits[tok.eos_id] = float("-inf")
+
         if top_k:
             k = min(top_k, logits.size(-1))
             kth = torch.topk(logits, k).values[-1]
@@ -96,7 +125,24 @@ def generate(decoder, clm_head, tok, prompt, *, max_new_tokens=120,
             break
         ids.append(nxt)
         generated.append(nxt)
-    return tok.decode(generated)
+
+        # if the student leaks into a new turn, stop and keep only this answer
+        text = tok.decode(generated)
+        cut = min((text.find(s) for s in stop_strings if s in text), default=-1)
+        if cut != -1:
+            return _strip_markers(text[:cut])
+
+    return _strip_markers(tok.decode(generated))
+
+
+def _strip_markers(text):
+    """Trim a leaked leading turn marker (the prompt ended at 'Bot:', so the
+    student sometimes echoes 'Bot:' back) and surrounding whitespace."""
+    out = text.strip()
+    for m in ("Bot:", "Bot :", "User:", "Assistant:"):
+        if out.startswith(m):
+            out = out[len(m):].strip()
+    return out
 
 
 def load_model(ckpt_path, device="cpu"):

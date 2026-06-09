@@ -150,7 +150,7 @@ for q in ["What is formative assessment?",
           "Give two classroom management tips.",
           "How does spaced repetition help learning?"]:
     ans = generate(decoder, clm, tok, f"User: {q}\nBot:",
-                   max_new_tokens=120, temperature=0.8, top_k=40, device=device)
+                   max_new_tokens=120, temperature=0.7, top_k=40, device=device)
     print("Q:", q)
     print("A:", ans)
     print("-" * 70)
