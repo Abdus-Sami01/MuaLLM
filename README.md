@@ -1,94 +1,80 @@
-# slm_qa
+<div align="center">
 
-Small Language Model for extractive QA on the teaching / education domain.
-Semester project. Custom subquadratic attention variants. CPU-trainable.
+# MuaLLM
 
-## Goal
+**A ~20M-parameter language model built from scratch — tokenizer, attention kernels, training loop and all — and taught to chat by distilling a local open-weight teacher. No paid APIs, no big GPUs.**
 
-Given a question and a passage from a teacher profession guide (Wikipedia
-education corpus + similar), predict the answer span inside the passage.
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/pytorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
+[![Teacher](https://img.shields.io/badge/teacher-SmolLM2--360M--Instruct-FFD21E.svg)](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct)
+[![Compute](https://img.shields.io/badge/compute-CPU%20%2F%20free%20Colab-22c55e.svg)]()
 
-Not a chatbot. Not generative. Extractive QA only.
+</div>
+
+---
+
+## Why this exists
+
+Training a tiny model from scratch on a small corpus produces gibberish — that's a **scale problem, not a bug**. MuaLLM's answer is **logit-level knowledge distillation**: run a local open-weight instruct teacher once, cache its top-k logits, and train the tiny student against the teacher's full distribution instead of hard labels. Soft targets transfer knowledge ~10–100× more sample-efficiently, which is what makes a from-scratch ~20M model usable on hobbyist compute.
+
+The second experiment baked in from the start: **the attention block is swappable by config**, so subquadratic variants can be benchmarked head-to-head on identical everything-else.
+
+| Variant | Complexity | Notes |
+|---|---|---|
+| Softmax | `O(n²)` | causal scaled dot-product baseline |
+| Linear attention | `O(n·d²)` | Katharopoulos et al. 2020, causal cumsum |
+| RWKV time-mix | `O(n·d)` | linear recurrence with token-shift |
+| Mamba-2 | `O(n)` | real `mamba-ssm` kernel on CUDA, fallback elsewhere |
 
 ## Architecture
 
-Encoder-only, ~8M parameters, swappable attention block.
+- **Decoder-only, pre-LN**, ~20M params at `d_model=256`; token+positional embeddings → N `DecoderBlock`s (swappable attention + GELU FFN) → tied `CausalLMHead`
+- **Tokenizer, two paths**: a from-scratch 8k BPE (trained locally with `tokenizers`) for the SFT path, or the teacher's HF tokenizer for the distillation path (student embedding size follows teacher vocab)
+- **Distillation loss**: `L = α·CE + (1−α)·T²·KL(student ∥ teacher-top-k)`
 
+## Pipeline
+
+```bash
+# 1. Local teacher generates an education-domain corpus (no API calls)
+python -m src.data.gen_sft --teacher HuggingFaceTB/SmolLM2-360M-Instruct \
+    --n 8000 --out data/qa/edu_seqkd.jsonl --txt data/raw/edu_seqkd.txt
+
+# 2. Cache teacher top-k logits to shards (teacher runs exactly once)
+python -m src.train.distill cache --corpus data/raw/edu_seqkd.txt \
+    --teacher HuggingFaceTB/SmolLM2-360M-Instruct --out data/distill/logits \
+    --max-len 512 --topk 20
+
+# 3. Train the student against the cached distribution
+python -m src.train.distill train
+
+# 4. Chat with it
+python chat.py
 ```
-Input: [CLS] question [SEP] context [SEP]
-   |
-   v  Embedding(vocab=8k, d=256) + positional
-   |
-   v  N x EncoderBlock(attention=<variant>, ffn=1024)
-   |
-   v  SpanHead -> (start_logits, end_logits)
+
+Sanity check the whole stack in under a minute:
+
+```bash
+python -m src.train.smoke_test   # decreasing loss on a toy corpus
 ```
-
-## Attention variants implemented
-
-1. **Softmax** (baseline, `O(n^2)`) — vanilla scaled dot-product
-2. **Linear attention** (Katharopoulos et al. 2020, `O(n d^2)`) — `phi(Q)(phi(K)^T V)`
-3. **RWKV time-mix** (`O(n d)`) — linear recurrence with token-shift
-
-All three share the same encoder skeleton. Swap by config.
-
-## Training stages
-
-1. **Tokenizer**: train BPE (vocab 8k) on raw corpus.
-2. **MLM pretrain**: masked language modeling on ~50 MB Wikipedia education
-   subset. CPU, 2-3 days, 1-2 epochs.
-3. **QA fine-tune**: extractive span head on ~2000 synthetic QA pairs
-   (manual + rule-based).
-4. **Eval**: Exact Match, F1, latency, peak memory. Three variants compared.
-
-## Hardware target
-
-- Training: CPU on local Windows PC (8-16 core, 16-32 GB RAM)
-- Optional: Kaggle T4 GPU for ablation runs (30 hr/week free tier)
-
-## Stack
-
-Open source only. No API wrappers.
-
-- `torch` — framework
-- `tokenizers` — BPE training (local, not API)
-- `datasets` — load Wikipedia dump locally
-- `pdfplumber`, `beautifulsoup4` — text extraction
-- `numpy`, `matplotlib`, `tqdm`
 
 ## Layout
 
 ```
-slm_qa/
-  data/{raw,processed,qa}/
-  src/
-    tokenizer/   BPE training
-    data/        extract.py, chunk.py, qa_gen.py
-    model/
-      attention/ softmax.py, linear.py, rwkv.py
-      block.py, encoder.py, heads.py
-    train/       pretrain_mlm.py, finetune_qa.py
-    eval/        metrics.py, benchmark.py
-  configs/       base.yaml, variant_*.yaml
-  scripts/       download_wiki.ps1, run_*.ps1
-  tests/         unit tests
-  notebooks/     EDA + ablation plots
+src/
+  tokenizer/   from-scratch BPE training
+  data/        corpus extraction, chunking, teacher generation
+  model/
+    attention/ softmax.py, linear.py, rwkv.py, ssm/ (mamba2)
+    block.py, decoder.py, heads.py
+  train/       distill.py (cache + train), pretrain_mlm.py, finetune_qa.py
+  infer/       generate.py (TokAdapter loads either tokenizer path)
+configs/       base.yaml + one config per attention variant
 ```
 
-## Quick smoke test
+## Project history
 
-```
-python -m src.train.smoke_test
-```
+Started life as `slm_qa`, an encoder-only extractive QA model (BPE → MLM pretrain on a ~50 MB Wikipedia education subset → span head), trained entirely on CPU. The from-scratch generative attempt at this scale confirmed the gibberish wall, which motivated the pivot to distillation — the negative result is part of the point. The legacy QA path (`QASpanHead`, MLM pretraining) is still in the repo and still runs.
 
-Should print decreasing loss on a toy corpus in under a minute.
+## Hardware
 
-## Status
-
-- [x] Scaffold
-- [ ] Attention variants
-- [ ] Encoder + heads
-- [ ] Tokenizer + data pipeline
-- [ ] MLM pretrain
-- [ ] QA fine-tune
-- [ ] Eval + ablation
+Everything targets **CPU or free-tier GPUs** (Colab/Kaggle T4): teacher generation and logit caching in bf16 on a free GPU, student training on CPU if needed. Open-source stack only — `torch`, `tokenizers`, `datasets`; no API wrappers anywhere.
